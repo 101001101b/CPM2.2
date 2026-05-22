@@ -122,11 +122,14 @@ int main(int argc, char *argv[])
      }
  
     // Matriu dispersa per matriu densa (cache-friendly amb inversió de bucles)
+    // Guardem en variables locals registrades els límits de C1
+    // per evitar recalcular l'offset contínuament dins dels registres L1 de la CPU.
     for (k = 0; k < ND; k++) {
         int row_A = AD[k].i * N_local;
         int row_B = AD[k].j * N;
         int val_A = AD[k].v;
-        for (i = offset; i < offset + N_local; i++) {
+        int end_i = offset + N_local;
+        for (i = offset; i < end_i; i++) {
             C1_local[row_A + (i - offset)] += val_A * B[row_B + i];
             ops_local++;
         }
@@ -136,6 +139,7 @@ int main(int argc, char *argv[])
     bzero(VBcol, sizeof(int) * N);
 
     for(i = offset; i < offset + N_local; i++) {
+        // Reduïm operacions traient la resta d'índex local fora del bucle intern
         int col_idx = i - offset;
         
         // Expandir columna de B[*][i] a VBcol
@@ -143,8 +147,9 @@ int main(int argc, char *argv[])
             VBcol[BD[k].i] = BD[k].v;
         
         for (k = 0; k < ND; k++) {
-            if (VBcol[AD[k].j] != 0) {
-                C2_local[AD[k].i * N_local + col_idx] += AD[k].v * VBcol[AD[k].j];
+            int target_j = AD[k].j;
+            if (VBcol[target_j] != 0) {
+                C2_local[AD[k].i * N_local + col_idx] += AD[k].v * VBcol[target_j];
                 ops_local++;
             }
         }
@@ -167,8 +172,9 @@ int main(int argc, char *argv[])
         
         // Càlcul de la columna dispersa de C i neteja esparsa de VBcol al mateix temps
         for (k = 0; k < ND; k++) {
-            if (VBcol[AD[k].j] != 0) {
-                VCcol[AD[k].i] += AD[k].v * VBcol[AD[k].j];
+            int target_j = AD[k].j;
+            if (VBcol[target_j] != 0) {
+                VCcol[AD[k].i] += AD[k].v * VBcol[target_j];
             }
         }
         
