@@ -17,6 +17,7 @@ tmd *AD, *BD, *CD;
 
 long long Suma_local = 0, Suma_global = 0;
 int neleC_local = 0, neleC_global = 0;
+long long ops_local = 0, ops_global = 0;
 
 int cmp_fil(const void *pa, const void *pb)
 {
@@ -55,7 +56,7 @@ int main(int argc, char *argv[])
 
     int i,j,k;
 
-    // CÀLCUL DEL REPARTIMENT DE COLUMNES
+    // REPARTIMENT DE LA FEINA (COLUMNES DE LES MATRIUS RESULTANTS)
     int base_count = N / size;
     int remainder = N % size;
     int N_local = base_count + (rank < remainder ? 1 : 0);
@@ -65,7 +66,7 @@ int main(int argc, char *argv[])
         offset += base_count + (p < remainder ? 1 : 0);
     }
     
-    // RESERVA DE MEMÒRIA DINÀMICA
+    // RESERVA DE MEMÒRIA DINÀMICA AL HEAP (per evitar stack overflow amb N=8000)
     A = (int *)calloc(N * N, sizeof(int));
     B = (int *)calloc(N * N, sizeof(int));
 
@@ -81,6 +82,7 @@ int main(int argc, char *argv[])
     BD = (tmd *)malloc(ND * sizeof(tmd));
     CD = (tmd *)malloc(N * N * sizeof(tmd));
     
+    // Generació a l'ombra amb llavor fixa per garantir coherència    
     srand(1);
     for(k=0;k<ND;k++)
     {
@@ -119,52 +121,76 @@ int main(int argc, char *argv[])
       jBD[j] = k;
      }
  
-    // Matriu dispersa per matriu densa
-    for(i = offset; i < offset + N_local; i++) {
-        int col_idx = i - offset;
-        for (k = 0; k < ND; k++) {
-            C1_local[AD[k].i * N_local + col_idx] += AD[k].v * B[AD[k].j * N + i];
+    // Matriu dispersa per matriu densa (cache-friendly amb inversió de bucles)
+    for (k = 0; k < ND; k++) {
+        int row_A = AD[k].i * N_local;
+        int row_B = AD[k].j * N;
+        int val_A = AD[k].v;
+        for (i = offset; i < offset + N_local; i++) {
+            C1_local[row_A + (i - offset)] += val_A * B[row_B + i];
+            ops_local++;
         }
     }
 
-    // Matriu dispersa per matriu dispersa
+    // Matriu dispersa per matriu dispersa amb optimitzacions de localitat i neteja esparsa
     bzero(VBcol, sizeof(int) * N);
+
     for(i = offset; i < offset + N_local; i++) {
         int col_idx = i - offset;
+        
+        // Expandir columna de B[*][i] a VBcol
         for (k = jBD[i]; k < jBD[i+1]; k++)
             VBcol[BD[k].i] = BD[k].v;
         
         for (k = 0; k < ND; k++) {
-            C2_local[AD[k].i * N_local + col_idx] += AD[k].v * VBcol[AD[k].j];
+            if (VBcol[AD[k].j] != 0) {
+                C2_local[AD[k].i * N_local + col_idx] += AD[k].v * VBcol[AD[k].j];
+                ops_local++;
+            }
         }
-        for (j = 0; j < N; j++)
-            VBcol[j] = 0;
+        
+        // NETEJA ESPARSA: Només posem a zero el que hem modificat
+        for (k = jBD[i]; k < jBD[i+1]; k++) {
+            VBcol[BD[k].i] = 0;
+        }
     }
                 
-    // Compressió i càlcul de la Suma de CD
+    // COMPRESSIÓ: Generació de la llista CD amb neteja esparsa integrada
     neleC_local = 0;
-    for (j=0; j<N; j++) VBcol[j] = VCcol[j] = 0;
+    bzero(VBcol, sizeof(int) * N);
+    bzero(VCcol, sizeof(int) * N);
 
     for(i = offset; i < offset + N_local; i++) {
+        // Expandir columna de B[*][i] a VBcol
         for (k = jBD[i]; k < jBD[i+1]; k++)
             VBcol[BD[k].i] = BD[k].v;
         
-        for (k = 0; k < ND; k++)
-            VCcol[AD[k].i] += AD[k].v * VBcol[AD[k].j];
-            
-        for (j = 0; j < N; j++) {
-            VBcol[j] = 0;
-            if (VCcol[j]) {
-                CD[neleC_local].i = j;
+        // Càlcul de la columna dispersa de C i neteja esparsa de VBcol al mateix temps
+        for (k = 0; k < ND; k++) {
+            if (VBcol[AD[k].j] != 0) {
+                VCcol[AD[k].i] += AD[k].v * VBcol[AD[k].j];
+            }
+        }
+        
+        // Neteja esparsa de VBcol
+        for (k = jBD[i]; k < jBD[i+1]; k++) {
+            VBcol[BD[k].i] = 0;
+        }
+        
+        // Compressió i neteja esparsa de VCcol (només si la posició té dades)
+        for (k = 0; k < ND; k++) {
+            int row_A = AD[k].i;
+            if (VCcol[row_A] != 0) {
+                CD[neleC_local].i = row_A;
                 CD[neleC_local].j = i;
-                CD[neleC_local].v = VCcol[j];
-                VCcol[j] = 0;
+                CD[neleC_local].v = VCcol[row_A];
+                VCcol[row_A] = 0;
                 neleC_local++;
             }
         }
     }
 
-    // Comprovacio MD x M -> M i MD x MD -> M (Cada un comprova les seves columnes locals)
+    // COMPROVACIONS I REDUCCIONS 
     for (i = offset; i < offset + N_local; i++) {
         int col_idx = i - offset;
         for (j = 0; j < N; j++) {
@@ -189,13 +215,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Reduïm les sumes i els elements totals cap al procés 0
     MPI_Reduce(&Suma_local, &Suma_global, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&neleC_local, &neleC_global, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&ops_local, &ops_global, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
     if (rank == 0) {
         printf("\nNumero elements de la matriu dispersa C %d\n", neleC_global);   
-        printf("Suma dels elements de C: %lld\n", Suma_global);
+        printf("Suma dels elements de C %lld\n", Suma_global);
+        printf("Total operacions multiplicacio %lld\n", ops_global);
         fflush(stdout);
     }
 

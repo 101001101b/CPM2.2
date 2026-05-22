@@ -14,11 +14,11 @@ fi
 
 # Temps sequencial marcat per l'enunciat per a N=8000
 SEQ_JUTGES=19.5
-ROW_FMT="%-20s | %-12s | %-16s | %-8s | %-14s |\n"
+ROW_FMT="%-20s | %-12s | %-16s | %-8s | %-14s | %-12s | %-14s |\n"
 
-echo "================================================================================================"
+echo "========================================================================================================================="
 echo " PROVES MPI EN MÀQUINES JUTGES (Temps seq base: 19.5s | N=$N_SIZE)"
-echo "================================================================================================"
+echo "========================================================================================================================="
 
 # ==============================================================================
 echo "Generant Referencia Mestra (1 proceso) per validació estricta..."
@@ -31,13 +31,13 @@ if [ ! -s ref.out ]; then
     exit 1
 fi
 echo "Referència generada correctament."
-echo "------------------------------------------------------------------------------------------------"
+echo "-------------------------------------------------------------------------------------------------------------------------"
 
 sum_inv_S_time=0
 count=0
 
-printf "$ROW_FMT" "Nodes / PPN (Procs)" "Time (s)" "Speedup (Time)" "Valid" "Suma C"
-echo "------------------------------------------------------------------------------------------------"
+printf "$ROW_FMT" "Nodes / PPN (Procs)" "Time (s)" "Speedup (Time)" "Valid" "Suma C" "Elements CD" "Operacions"
+echo "-------------------------------------------------------------------------------------------------------------------------"
 
 CONFIGS=(
     "2 1" "4 1" "8 1"
@@ -60,14 +60,24 @@ for config in "${CONFIGS[@]}"; do
     OUTPUT=$(cat run.out)
     rm -f run.out
     
-    # Extraiem el temps real i la suma final
+    # Extraiem el temps real, la suma i els elements enllaçant amb els printfs del C
     TIME_REAL=$(echo "$OUTPUT" | grep "TEMPS_REAL:" | cut -d':' -f2 | grep -oE '[0-9.]+')
     SUMA_TEXT=$(echo "$OUTPUT" | grep "Suma dels elements de C" | grep -oE '[0-9]+')
+    NELEC_TEXT=$(echo "$OUTPUT" | grep "Numero elements de la matriu dispersa C" | grep -oE '[0-9]+') 
+    OPS_TEXT=$(echo "$OUTPUT" | grep "Total operacions multiplicacio" | grep -oE '[0-9]+')
     
+    if [ -z "$NELEC_TEXT" ]; then
+        NELEC_TEXT="ERR"
+    fi
+    
+    if [ -z "$OPS_TEXT" ]; then
+        OPS_TEXT="ERR"
+    fi
+
     # Verificacio estricta contra la referencia mestre
-    echo "$OUTPUT" | grep "Suma dels elements" > test.out
-    if diff -q ref.out test.out > /dev/null; then
-        VALID="OK"
+    echo "$OUTPUT" | grep "Suma dels elements de C" | grep -oE '[0-9]+' | tail -n 1 > test.out
+    if [ -s ref.out ] && [ -s test.out ] && diff -q <(grep -oE '[0-9]+' ref.out) test.out > /dev/null; then 
+           VALID="OK"
     else
         VALID="MAL"
     fi     
@@ -82,16 +92,16 @@ for config in "${CONFIGS[@]}"; do
         sum_inv_S_time=$(awk -v sum="$sum_inv_S_time" -v seq="$SEQ_JUTGES" -v par="$TIME_REAL" 'BEGIN { print sum + (par/seq) }')
         TIME_REAL_FMT=$(awk -v real="$TIME_REAL" 'BEGIN { printf "%.3f", real }')
     fi
-    
-    printf "$ROW_FMT" "$nodes / $ppn ($procs)" "${TIME_REAL_FMT}" "${SPEEDUP_TIME}" "$VALID" "${SUMA_TEXT}"
+     
+    printf "$ROW_FMT" "$nodes / $ppn ($procs)" "${TIME_REAL_FMT}" "${SPEEDUP_TIME}" "$VALID" "${SUMA_TEXT}" "${NELEC_TEXT}" "${OPS_TEXT}"
     ((count++))
 done
 
 HMEAN_TIME=$(awk -v n="$count" -v sum_inv="$sum_inv_S_time" 'BEGIN { printf "%.5f", n/sum_inv }')
 
-echo "------------------------------------------------------------------------------------------------"
+echo "-------------------------------------------------------------------------------------------------------------------------"
 echo "-> MITJANA HARMÒNICA SPEEDUP (Time): $HMEAN_TIME"
-echo "================================================================================================"
+echo "========================================================================================================================="
 
 # Neteja de fitxers temporals finals
 rm -f $EXE ref.out test.out
