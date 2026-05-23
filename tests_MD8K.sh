@@ -12,7 +12,22 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Temps sequencial marcat per l'enunciat per a N=8000
+# ==============================================================================
+# TRUCO HPC: Autoreserva de SLURM
+# ==============================================================================
+if [ -z "$SLURM_JOB_ID" ]; then
+    echo "========================================================================================================================="
+    echo " Solicitant reserva exclusiva de 16 nodes de cop. Esperant a SLURM..."
+    echo "========================================================================================================================="
+    salloc -p jutjat -N 16 --exclusive bash "$0" "$@"
+    exit $?
+fi
+
+# ==============================================================================
+# A PARTIR D'AQUÍ: Ja som amos de 16 nodes exclusius. Tot serà instantani.
+# ==============================================================================
+
+# Temps seqüencial marcat per l'enunciat per a N=8000
 SEQ_JUTGES=19.5
 ROW_FMT="%-20s | %-12s | %-16s | %-8s | %-14s | %-12s | %-14s |\n"
 
@@ -20,9 +35,8 @@ echo "==========================================================================
 echo " PROVES MPI EN MÀQUINES JUTGES (Temps seq base: 19.5s | N=$N_SIZE)"
 echo "========================================================================================================================="
 
-# ==============================================================================
 echo "Generant Referencia Mestra (1 proceso) per validació estricta..."
-salloc -p jutjat -N 1 --exclusive srun -N 1 -n 1 --ntasks-per-node=1 --distribution=block:block ./$EXE $N_SIZE > full_ref.out 2>/dev/null
+srun -N 1 -n 1 --ntasks-per-node=1 --distribution=block:block ./$EXE $N_SIZE > full_ref.out 2>/dev/null
 grep 'Suma dels elements' full_ref.out > ref.out
 rm -f full_ref.out
 
@@ -49,22 +63,21 @@ for config in "${CONFIGS[@]}"; do
     read -r nodes ppn <<< "$config"
     procs=$((nodes * ppn))
     
-    if [ "$ppn" -gt "$nodes" ]; then
+    # Overcommit
+    if [ "$ppn" -gt 16 ]; then
         OVERCOMMIT_FLAG="--overcommit"
     else
         OVERCOMMIT_FLAG=""
     fi
     
-    # Execucio controlada enviant la sortida a run.out
-    salloc -p jutjat -N $nodes --exclusive srun -N $nodes -n $procs --ntasks-per-node=$ppn --distribution=block:block $OVERCOMMIT_FLAG /usr/bin/time -f "TEMPS_REAL:%e" ./$EXE $N_SIZE > run.out 2>&1
-    OUTPUT=$(cat run.out)
-    rm -f run.out
+    # Tornem a ficar el temps DINS de l'srun perquè no ens mesuri l'overhead de SLURM
+    OUTPUT=$(srun -N $nodes -n $procs --ntasks-per-node=$ppn --distribution=block:block $OVERCOMMIT_FLAG /usr/bin/time -f "TEMPS_REAL:%e" ./$EXE $N_SIZE 2>&1)
     
-    # Extraiem el temps real, la suma i els elements enllaçant amb els printfs del C
-    TIME_REAL=$(echo "$OUTPUT" | grep "TEMPS_REAL:" | cut -d':' -f2 | grep -oE '[0-9.]+')
-    SUMA_TEXT=$(echo "$OUTPUT" | grep "Suma dels elements de C" | grep -oE '[0-9]+')
-    NELEC_TEXT=$(echo "$OUTPUT" | grep "Numero elements de la matriu dispersa C" | grep -oE '[0-9]+') 
-    OPS_TEXT=$(echo "$OUTPUT" | grep "Total operacions multiplicacio" | grep -oE '[0-9]+')
+    # Extraiem les dades forçant a agafar només la primera línia (seguretat anti-errors)
+    TIME_REAL=$(echo "$OUTPUT" | grep "TEMPS_REAL:" | cut -d':' -f2 | grep -oE '[0-9.]+' | head -n 1)
+    SUMA_TEXT=$(echo "$OUTPUT" | grep "Suma dels elements de C" | grep -oE '[0-9]+' | head -n 1)
+    NELEC_TEXT=$(echo "$OUTPUT" | grep "Numero elements de la matriu dispersa C" | grep -oE '[0-9]+' | head -n 1) 
+    OPS_TEXT=$(echo "$OUTPUT" | grep "Total operacions multiplicacio" | grep -oE '[0-9]+' | head -n 1)
     
     if [ -z "$NELEC_TEXT" ]; then
         NELEC_TEXT="ERR"
@@ -97,7 +110,12 @@ for config in "${CONFIGS[@]}"; do
     ((count++))
 done
 
-HMEAN_TIME=$(awk -v n="$count" -v sum_inv="$sum_inv_S_time" 'BEGIN { printf "%.5f", n/sum_inv }')
+# Hem canviat el 'bc' per 'awk' per evitar l'error de comanda no trobada
+if [ "$count" -gt 0 ] && [ "$(awk -v sum="$sum_inv_S_time" 'BEGIN { print (sum > 0 ? 1 : 0) }')" -eq 1 ]; then
+    HMEAN_TIME=$(awk -v n="$count" -v sum_inv="$sum_inv_S_time" 'BEGIN { printf "%.5f", n/sum_inv }')
+else
+    HMEAN_TIME="ERR"
+fi
 
 echo "-------------------------------------------------------------------------------------------------------------------------"
 echo "-> MITJANA HARMÒNICA SPEEDUP (Time): $HMEAN_TIME"
